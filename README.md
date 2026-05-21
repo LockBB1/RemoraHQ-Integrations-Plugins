@@ -19,9 +19,13 @@ The Jira API token is **server-side only** — it never touches the browser. The
 
 The plugin picks Basic if `JIRA_EMAIL` is set, otherwise Bearer.
 
-### Optional `JIRA_LOGIN` (default assignee)
+### Optional `JIRA_LOGIN` (fallback default assignee)
 
-On some Jira Server / DC projects the create screen requires `assignee`. Jira then returns a misleading `Could not find issuetype` error instead of the real "assignee required" message. Set `JIRA_LOGIN` to the username of any valid Jira account (e.g. a service account) and the plugin will populate `fields.assignee = { name: JIRA_LOGIN }` on every created issue.
+On some Jira Server / DC projects the create screen requires `assignee`. Jira then returns a misleading `Could not find issuetype` error instead of the real "assignee required" message. `JIRA_LOGIN` is the **fallback** assignee — used only when the RemoraHQ UI does not pass `assigneeName` in `jira.create`. The UI value (set in `Admin → Integrations → Jira → Configure → Default assignee`) always wins.
+
+### Reporter override
+
+`jira.create` accepts an optional `reporterName`. When present, the plugin sets `fields.reporter = { name: reporterName }` so the issue's reporter is the actual RemoraHQ user that clicked "Create", not the service account behind the PAT. The PAT account must have the `Modify Reporter` permission in the target project; otherwise Jira rejects the request.
 
 ## Wire protocol
 
@@ -40,7 +44,8 @@ server → { result:'ok', userEmail, displayName }   // GET /rest/api/{3,2}/myse
 
 ```js
 client → { action:'plugin', plugin:'remoraIntegrations', pluginaction:'jira.create',
-           tag, responseid, baseUrl, projectKey, issueType?, summary, description }
+           tag, responseid, baseUrl, projectKey, issueType?, summary, description,
+           reporterName?, assigneeName? }
 server → { result:'ok', key, url }   // POST /rest/api/{3,2}/issue
        | { result:'error', error }
 ```

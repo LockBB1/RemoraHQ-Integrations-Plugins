@@ -33,7 +33,7 @@ var http = require('http');
 var url = require('url');
 
 var PLUGIN_SHORT_NAME = 'remoraIntegrations';
-var PLUGIN_VERSION = '0.1.4';
+var PLUGIN_VERSION = '0.1.5';
 var JIRA_TIMEOUT_MS = 15000;
 
 /**
@@ -308,11 +308,17 @@ module.exports.remoraIntegrations = function (parent) {
                 ? { id: String(issueType) }
                 : { name: String(issueType) };
 
-            // Optional default assignee from env. Useful on Jira Server/DC
-            // installations where the project's create screen requires
-            // assignee (otherwise Jira returns a vague "Could not find
-            // issuetype" instead of the real "assignee required" error).
-            var defaultAssignee = process.env.JIRA_LOGIN;
+            // Assignee precedence: client-provided assigneeName (from UI
+            // config) > JIRA_LOGIN env (legacy fallback). If both empty,
+            // assignee is omitted so Jira uses the project default.
+            var assigneeName = command.assigneeName;
+            if (!assigneeName) assigneeName = process.env.JIRA_LOGIN || '';
+
+            // Reporter: when client passes reporterName, override the
+            // PAT-account-as-author behaviour so the actual end user that
+            // clicked "Create" is the reporter in Jira. Requires the PAT
+            // account to have "Modify Reporter" permission in the project.
+            var reporterName = command.reporterName;
 
             function payloadFor(apiVersion) {
                 var fields = {
@@ -320,8 +326,11 @@ module.exports.remoraIntegrations = function (parent) {
                     issuetype: issueTypeRef,
                     summary: summary
                 };
-                if (defaultAssignee) {
-                    fields.assignee = { name: String(defaultAssignee) };
+                if (assigneeName) {
+                    fields.assignee = { name: String(assigneeName) };
+                }
+                if (reporterName) {
+                    fields.reporter = { name: String(reporterName) };
                 }
                 // Jira Cloud (v3) wants ADF; Jira Server / DC (v2) wants a plain string.
                 fields.description = (apiVersion === 3) ? adfDescription(description) : description;
