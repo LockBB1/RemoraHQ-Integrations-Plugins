@@ -28,7 +28,7 @@ Standard RemoraHQ plugin envelope. Two pluginactions:
 ```js
 client → { action:'plugin', plugin:'remoraIntegrations', pluginaction:'jira.test',
            tag, responseid, baseUrl }
-server → { result:'ok', userEmail, displayName }   // GET /rest/api/3/myself
+server → { result:'ok', userEmail, displayName }   // GET /rest/api/{3,2}/myself
        | { result:'error', error }
 ```
 
@@ -37,9 +37,15 @@ server → { result:'ok', userEmail, displayName }   // GET /rest/api/3/myself
 ```js
 client → { action:'plugin', plugin:'remoraIntegrations', pluginaction:'jira.create',
            tag, responseid, baseUrl, projectKey, issueType?, summary, description }
-server → { result:'ok', key, url }   // POST /rest/api/3/issue
+server → { result:'ok', key, url }   // POST /rest/api/{3,2}/issue
        | { result:'error', error }
 ```
+
+Both actions probe v3 (Cloud) first, then fall back to v2 (Server/DC) on
+404 OR any 3xx redirect — Jira Server/DC 9.x responds to unknown REST
+paths like `/rest/api/3/myself` with a 302 → `/login.jsp` even when the
+Bearer PAT successfully authenticates (Seraph still returns
+`x-seraph-loginreason: OK`), so a 404-only fallback would never reach v2.
 
 ## Limits
 

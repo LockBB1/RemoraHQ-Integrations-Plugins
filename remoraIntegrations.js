@@ -7,8 +7,14 @@
  *
  * Wire envelope follows the RemoraHQ plugin convention (see remoraCore.js
  * comment header). Two pluginactions:
- *   - jira.test    GET /rest/api/3/myself      verifies key + baseUrl
- *   - jira.create  POST /rest/api/3/issue      creates an issue
+ *   - jira.test    GET /rest/api/{3,2}/myself  verifies key + baseUrl
+ *   - jira.create  POST /rest/api/{3,2}/issue  creates an issue
+ *
+ * Endpoint probe order is v3 (Cloud) → v2 (Server/DC). Jira Server/DC 9.x
+ * responds to unknown REST paths (like /rest/api/3/*) with a 302 redirect
+ * to /login.jsp — NOT a 404 — even with a valid Bearer PAT. The fallback
+ * therefore triggers on 404 OR any 3xx, otherwise the v2 path is never
+ * tried on Server/DC.
  *
  * Auth:
  *   - JIRA_EMAIL set → Basic base64(email:token)        (Jira Cloud)
@@ -27,7 +33,7 @@ var http = require('http');
 var url = require('url');
 
 var PLUGIN_SHORT_NAME = 'remoraIntegrations';
-var PLUGIN_VERSION = '0.1.1';
+var PLUGIN_VERSION = '0.1.2';
 var JIRA_TIMEOUT_MS = 15000;
 
 /**
@@ -237,8 +243,10 @@ module.exports.remoraIntegrations = function (parent) {
 
     /**
      * Run a GET /myself probe and try v3 (Cloud) first, then v2 (Server/DC)
-     * on 404. Anything else (302/401/403) is returned as a structured error
-     * so the operator sees the real problem instead of a misleading "404".
+     * on 404 OR any 3xx redirect. Jira Server/DC 9.x answers unknown REST
+     * paths like /rest/api/3/myself with a 302 → /login.jsp (even with a
+     * valid Bearer PAT — Seraph still says x-seraph-loginreason: OK), so a
+     * 404-only fallback misses the real v3-not-supported case.
      */
     function runJiraTest(command) {
         return new Promise(function (resolve, reject) {
@@ -260,7 +268,7 @@ module.exports.remoraIntegrations = function (parent) {
                                 apiVersion: apiVersion
                             });
                         }
-                        if (res.status === 404 && next) {
+                        if (next && (res.status === 404 || (res.status >= 300 && res.status < 400))) {
                             return next();
                         }
                         return reject(new Error(jiraErrorMessage(res.status, res.body, res.headers)));
@@ -313,7 +321,7 @@ module.exports.remoraIntegrations = function (parent) {
                             var browseUrl = key ? (String(baseUrl).replace(/\/+$/, '') + '/browse/' + encodeURIComponent(key)) : '';
                             return resolve({ key: key, url: browseUrl, apiVersion: apiVersion });
                         }
-                        if (res.status === 404 && next) {
+                        if (next && (res.status === 404 || (res.status >= 300 && res.status < 400))) {
                             return next();
                         }
                         return reject(new Error(jiraErrorMessage(res.status, res.body, res.headers)));
