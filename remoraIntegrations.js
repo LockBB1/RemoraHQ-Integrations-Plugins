@@ -27,7 +27,7 @@ var http = require('http');
 var url = require('url');
 
 var PLUGIN_SHORT_NAME = 'remoraIntegrations';
-var PLUGIN_VERSION = '0.1.0';
+var PLUGIN_VERSION = '0.1.1';
 var JIRA_TIMEOUT_MS = 15000;
 
 /**
@@ -155,7 +155,24 @@ function sendReply(session, pluginAction, tag, responseid, payload) {
     session.send(msg);
 }
 
-function jiraErrorMessage(status, body) {
+function jiraErrorMessage(status, body, headers) {
+    // Redirects from Jira REST are almost always one of:
+    //   - auth failed → Jira sends you to login page
+    //   - baseUrl is wrong / missing context path (Server: /jira)
+    //   - http vs https mismatch
+    // Surface the Location header so the admin can see exactly where Jira
+    // wanted us to go.
+    if (status === 301 || status === 302 || status === 303 || status === 307 || status === 308) {
+        var loc = headers && (headers.location || headers.Location);
+        var locHint = loc ? ' → ' + String(loc).slice(0, 200) : '';
+        if (loc && /login|signin|sso/i.test(String(loc))) {
+            return 'jira_http_' + status + '_auth_redirect' + locHint + ' (check JIRA_API_KEY / JIRA_EMAIL)';
+        }
+        return 'jira_http_' + status + locHint + ' (check baseUrl — Jira Server often needs the context path, e.g. https://host/jira)';
+    }
+    if (status === 401) return 'jira_http_401_unauthorized (check JIRA_API_KEY / JIRA_EMAIL)';
+    if (status === 403) return 'jira_http_403_forbidden (token lacks permission to create/read issues)';
+    if (status === 404) return 'jira_http_404 (REST endpoint not found at this baseUrl)';
     if (body && typeof body === 'object') {
         if (Array.isArray(body.errorMessages) && body.errorMessages.length > 0) {
             return String(body.errorMessages[0]);
@@ -218,22 +235,41 @@ module.exports.remoraIntegrations = function (parent) {
         }
     };
 
+    /**
+     * Run a GET /myself probe and try v3 (Cloud) first, then v2 (Server/DC)
+     * on 404. Anything else (302/401/403) is returned as a structured error
+     * so the operator sees the real problem instead of a misleading "404".
+     */
     function runJiraTest(command) {
         return new Promise(function (resolve, reject) {
             var auth = buildAuthHeader();
             if (!auth) return reject(new Error('jira_api_key_missing'));
             var baseUrl = command.baseUrl;
             if (!baseUrl || typeof baseUrl !== 'string') return reject(new Error('invalid_baseUrl'));
-            httpRequest('GET', joinUrl(baseUrl, '/rest/api/3/myself'), {
-                'Authorization': auth,
-                'Accept': 'application/json'
-            }, undefined).then(function (res) {
-                if (res.status >= 200 && res.status < 300) {
-                    var body = res.body || {};
-                    return resolve({ userEmail: body.emailAddress || '', displayName: body.displayName || '' });
-                }
-                return reject(new Error(jiraErrorMessage(res.status, res.body)));
-            }).catch(reject);
+
+            var headers = { 'Authorization': auth, 'Accept': 'application/json' };
+
+            function tryVersion(apiVersion, next) {
+                httpRequest('GET', joinUrl(baseUrl, '/rest/api/' + apiVersion + '/myself'), headers, undefined)
+                    .then(function (res) {
+                        if (res.status >= 200 && res.status < 300) {
+                            var body = res.body || {};
+                            return resolve({
+                                userEmail: body.emailAddress || '',
+                                displayName: body.displayName || '',
+                                apiVersion: apiVersion
+                            });
+                        }
+                        if (res.status === 404 && next) {
+                            return next();
+                        }
+                        return reject(new Error(jiraErrorMessage(res.status, res.body, res.headers)));
+                    })
+                    .catch(reject);
+            }
+
+            // Cloud → Server
+            tryVersion(3, function () { tryVersion(2, null); });
         });
     }
 
@@ -251,28 +287,41 @@ module.exports.remoraIntegrations = function (parent) {
             if (!summary || typeof summary !== 'string') return reject(new Error('invalid_summary'));
             if (typeof description !== 'string') description = '';
 
-            var payload = {
-                fields: {
-                    project: { key: projectKey },
-                    issuetype: { name: issueType },
-                    summary: summary,
-                    description: adfDescription(description)
-                }
-            };
-
-            httpRequest('POST', joinUrl(baseUrl, '/rest/api/3/issue'), {
+            var headers = {
                 'Authorization': auth,
                 'Accept': 'application/json',
                 'Content-Type': 'application/json'
-            }, payload).then(function (res) {
-                if (res.status >= 200 && res.status < 300) {
-                    var body = res.body || {};
-                    var key = body.key || '';
-                    var browseUrl = key ? (String(baseUrl).replace(/\/+$/, '') + '/browse/' + encodeURIComponent(key)) : '';
-                    return resolve({ key: key, url: browseUrl });
-                }
-                return reject(new Error(jiraErrorMessage(res.status, res.body)));
-            }).catch(reject);
+            };
+
+            function payloadFor(apiVersion) {
+                var fields = {
+                    project: { key: projectKey },
+                    issuetype: { name: issueType },
+                    summary: summary
+                };
+                // Jira Cloud (v3) wants ADF; Jira Server / DC (v2) wants a plain string.
+                fields.description = (apiVersion === 3) ? adfDescription(description) : description;
+                return { fields: fields };
+            }
+
+            function tryVersion(apiVersion, next) {
+                httpRequest('POST', joinUrl(baseUrl, '/rest/api/' + apiVersion + '/issue'), headers, payloadFor(apiVersion))
+                    .then(function (res) {
+                        if (res.status >= 200 && res.status < 300) {
+                            var body = res.body || {};
+                            var key = body.key || '';
+                            var browseUrl = key ? (String(baseUrl).replace(/\/+$/, '') + '/browse/' + encodeURIComponent(key)) : '';
+                            return resolve({ key: key, url: browseUrl, apiVersion: apiVersion });
+                        }
+                        if (res.status === 404 && next) {
+                            return next();
+                        }
+                        return reject(new Error(jiraErrorMessage(res.status, res.body, res.headers)));
+                    })
+                    .catch(reject);
+            }
+
+            tryVersion(3, function () { tryVersion(2, null); });
         });
     }
 
