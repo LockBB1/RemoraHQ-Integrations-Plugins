@@ -1,0 +1,17 @@
+{
+  "name": "RemoraHQ - Integrations",
+  "shortName": "remoraIntegrations",
+  "version": "0.1.0",
+  "description": "RemoraHQ external-service integrations bridge. Currently exposes Jira REST proxy actions (test connection + create issue). The API token is read from process.env on the Mesh server (.env-friendly) and never travels through the browser. PSO and SIEM connectors live elsewhere — PSO is browser-only (open URL + copy/paste), SIEM is planned.",
+  "hasAdminPanel": false,
+  "homepage": "https://github.com/lockbb1/RemoraHQ-Integrations-Plugins",
+  "changelogUrl": "https://github.com/lockbb1/RemoraHQ-Integrations-Plugins/releases",
+  "configUrl": "https://raw.githubusercontent.com/lockbb1/RemoraHQ-Integrations-Plugins/main/config.json",
+  "downloadUrl": "https://github.com/lockbb1/RemoraHQ-Integrations-Plugins/archive/refs/heads/main.zip",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lockbb1/RemoraHQ-Integrations-Plugins.git"
+  },
+  "meshCentralCompat": ">=1.1.56",
+  "versionHistoryUrl": "https://api.github.com/repos/lockbb1/RemoraHQ-Integrations-Plugins/tags"
+}

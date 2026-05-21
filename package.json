@@ -1,0 +1,14 @@
+{
+  "name": "remorahq-integrations-plugins",
+  "version": "0.1.0",
+  "description": "RemoraHQ Integrations MeshCentral plugin (Jira REST proxy)",
+  "main": "remoraIntegrations.js",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lockbb1/RemoraHQ-Integrations-Plugins.git"
+  },
+  "engines": {
+    "meshcentral": ">=1.1.56"
+  }
+}
