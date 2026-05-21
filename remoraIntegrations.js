@@ -33,7 +33,7 @@ var http = require('http');
 var url = require('url');
 
 var PLUGIN_SHORT_NAME = 'remoraIntegrations';
-var PLUGIN_VERSION = '0.1.2';
+var PLUGIN_VERSION = '0.1.3';
 var JIRA_TIMEOUT_MS = 15000;
 
 /**
@@ -301,10 +301,17 @@ module.exports.remoraIntegrations = function (parent) {
                 'Content-Type': 'application/json'
             };
 
+            // Jira accepts issuetype as either {id:"10004"} or {name:"Bug"}.
+            // Names are locale-sensitive and break after admin rename; ids
+            // are stable. Treat a digits-only value as an id.
+            var issueTypeRef = /^\d+$/.test(String(issueType))
+                ? { id: String(issueType) }
+                : { name: String(issueType) };
+
             function payloadFor(apiVersion) {
                 var fields = {
                     project: { key: projectKey },
-                    issuetype: { name: issueType },
+                    issuetype: issueTypeRef,
                     summary: summary
                 };
                 // Jira Cloud (v3) wants ADF; Jira Server / DC (v2) wants a plain string.
