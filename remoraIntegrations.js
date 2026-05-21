@@ -33,7 +33,7 @@ var http = require('http');
 var url = require('url');
 
 var PLUGIN_SHORT_NAME = 'remoraIntegrations';
-var PLUGIN_VERSION = '0.1.3';
+var PLUGIN_VERSION = '0.1.4';
 var JIRA_TIMEOUT_MS = 15000;
 
 /**
@@ -308,19 +308,28 @@ module.exports.remoraIntegrations = function (parent) {
                 ? { id: String(issueType) }
                 : { name: String(issueType) };
 
+            // Optional default assignee from env. Useful on Jira Server/DC
+            // installations where the project's create screen requires
+            // assignee (otherwise Jira returns a vague "Could not find
+            // issuetype" instead of the real "assignee required" error).
+            var defaultAssignee = process.env.JIRA_LOGIN;
+
             function payloadFor(apiVersion) {
                 var fields = {
                     project: { key: projectKey },
                     issuetype: issueTypeRef,
                     summary: summary
                 };
+                if (defaultAssignee) {
+                    fields.assignee = { name: String(defaultAssignee) };
+                }
                 // Jira Cloud (v3) wants ADF; Jira Server / DC (v2) wants a plain string.
                 fields.description = (apiVersion === 3) ? adfDescription(description) : description;
                 return { fields: fields };
             }
 
             function tryVersion(apiVersion, next) {
-                httpRequest('POST', joinUrl(baseUrl, '/rest/api/' + apiVersion + '/issue'), headers, payloadFor(apiVersion))
+                httpRequest('POST', joinUrl(baseUrl, '/rest/api/' + apiVersion + '/issue/'), headers, payloadFor(apiVersion))
                     .then(function (res) {
                         if (res.status >= 200 && res.status < 300) {
                             var body = res.body || {};

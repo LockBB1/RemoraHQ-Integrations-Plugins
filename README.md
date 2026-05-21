@@ -19,6 +19,10 @@ The Jira API token is **server-side only** — it never touches the browser. The
 
 The plugin picks Basic if `JIRA_EMAIL` is set, otherwise Bearer.
 
+### Optional `JIRA_LOGIN` (default assignee)
+
+On some Jira Server / DC projects the create screen requires `assignee`. Jira then returns a misleading `Could not find issuetype` error instead of the real "assignee required" message. Set `JIRA_LOGIN` to the username of any valid Jira account (e.g. a service account) and the plugin will populate `fields.assignee = { name: JIRA_LOGIN }` on every created issue.
+
 ## Wire protocol
 
 Standard RemoraHQ plugin envelope. Two pluginactions:

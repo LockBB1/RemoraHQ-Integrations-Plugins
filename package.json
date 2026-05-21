@@ -1,6 +1,6 @@
 {
   "name": "remorahq-integrations-plugins",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "RemoraHQ Integrations MeshCentral plugin (Jira REST proxy)",
   "main": "remoraIntegrations.js",
   "license": "Apache-2.0",
