@@ -33,8 +33,80 @@ var http = require('http');
 var url = require('url');
 
 var PLUGIN_SHORT_NAME = 'remoraIntegrations';
-var PLUGIN_VERSION = '0.1.5';
+var PLUGIN_VERSION = '0.2.0';
 var JIRA_TIMEOUT_MS = 15000;
+
+// v0.2.0 (RC-13.18 / B-13.5/2). Singleton Mesh DB doc holding the
+// non-secret integration config (baseUrl, projectKey, issueType,
+// assignee for Jira; baseUrl for PSO). Prior to v0.2.0 these lived in
+// each user's localStorage, so an Operator never saw the config the
+// Admin had entered. The Jira API token still lives in process.env on
+// the server — that secret never travels through this channel.
+var CONFIG_DOC_ID = 'remoraIntegrationsConfig';
+
+function emptyConfig() {
+    return { jira: null, pso: null, configuredAt: null };
+}
+
+function readConfig(meshServer, callback) {
+    if (!meshServer || !meshServer.db || typeof meshServer.db.Get !== 'function') {
+        callback(emptyConfig());
+        return;
+    }
+    meshServer.db.Get(CONFIG_DOC_ID, function (err, docs) {
+        if (err || !docs || docs.length === 0) { callback(emptyConfig()); return; }
+        var doc = docs[0] || {};
+        callback({
+            jira: (doc.jira && typeof doc.jira === 'object') ? doc.jira : null,
+            pso: (doc.pso && typeof doc.pso === 'object') ? doc.pso : null,
+            configuredAt: typeof doc.configuredAt === 'string' ? doc.configuredAt : null
+        });
+    });
+}
+
+function writeConfig(meshServer, next, callback) {
+    if (!meshServer || !meshServer.db || typeof meshServer.db.Set !== 'function') {
+        callback(new Error('no_db'));
+        return;
+    }
+    var doc = {
+        _id: CONFIG_DOC_ID,
+        type: 'remoraIntegrationsConfig',
+        jira: next.jira || null,
+        pso: next.pso || null,
+        configuredAt: new Date().toISOString()
+    };
+    meshServer.db.Set(doc, function (err) { callback(err || null, doc); });
+}
+
+/**
+ * Admin gate for write operations. We require Mesh's full siteadmin
+ * (0xFFFFFFFF) — same bit Mesh's own native config UI checks. Operators
+ * can READ the config (so they can submit bug reports) but cannot edit.
+ */
+function isAdminSession(sessionObj) {
+    var u = sessionObj && sessionObj.user;
+    if (!u) return false;
+    return u.siteadmin === 0xFFFFFFFF;
+}
+
+function sanitizeJiraConfig(raw) {
+    if (!raw || typeof raw !== 'object') return null;
+    var baseUrl = typeof raw.baseUrl === 'string' ? raw.baseUrl.trim() : '';
+    var projectKey = typeof raw.projectKey === 'string' ? raw.projectKey.trim() : '';
+    if (!baseUrl || !projectKey) return null;
+    var out = { baseUrl: baseUrl, projectKey: projectKey };
+    if (typeof raw.issueType === 'string' && raw.issueType.trim()) out.issueType = raw.issueType.trim();
+    if (typeof raw.assignee === 'string' && raw.assignee.trim()) out.assignee = raw.assignee.trim();
+    return out;
+}
+
+function sanitizePsoConfig(raw) {
+    if (!raw || typeof raw !== 'object') return null;
+    var baseUrl = typeof raw.baseUrl === 'string' ? raw.baseUrl.trim() : '';
+    if (!baseUrl) return null;
+    return { baseUrl: baseUrl };
+}
 
 /**
  * Minimal .env loader — no dependency on `dotenv`. Reads KEY=VALUE lines,
@@ -231,6 +303,103 @@ module.exports.remoraIntegrations = function (parent) {
                     sendReply(session, pluginAction, tag, responseid, { result: 'ok', key: data.key, url: data.url });
                 }).catch(function (err) {
                     sendReply(session, pluginAction, tag, responseid, { result: 'error', error: String(err && err.message ? err.message : err) });
+                });
+                return;
+            }
+            case 'config.get': {
+                // v0.2.0. Returns the deployment-wide integration config so
+                // every authenticated user (Operator included) sees the same
+                // "is integration configured" answer the admin entered. No
+                // secrets travel here — Jira API token stays in process.env.
+                readConfig(obj.meshServer, function (cfg) {
+                    sendReply(session, pluginAction, tag, responseid, {
+                        result: 'ok',
+                        jira: cfg.jira,
+                        pso: cfg.pso,
+                        configuredAt: cfg.configuredAt
+                    });
+                });
+                return;
+            }
+            case 'config.setJira': {
+                // v0.2.0. Admin-only write. We re-read existing doc so PSO
+                // config (if any) is preserved across Jira-only updates.
+                if (!isAdminSession(dbGet)) {
+                    sendReply(session, pluginAction, tag, responseid, { result: 'error', error: 'forbidden' });
+                    return;
+                }
+                var nextJira = sanitizeJiraConfig(command.jira);
+                if (!nextJira) {
+                    sendReply(session, pluginAction, tag, responseid, { result: 'error', error: 'invalid_payload' });
+                    return;
+                }
+                readConfig(obj.meshServer, function (cur) {
+                    writeConfig(obj.meshServer, { jira: nextJira, pso: cur.pso }, function (err, doc) {
+                        if (err) {
+                            sendReply(session, pluginAction, tag, responseid, { result: 'error', error: String(err.message || err) });
+                            return;
+                        }
+                        sendReply(session, pluginAction, tag, responseid, {
+                            result: 'ok',
+                            jira: doc.jira,
+                            pso: doc.pso,
+                            configuredAt: doc.configuredAt
+                        });
+                    });
+                });
+                return;
+            }
+            case 'config.setPso': {
+                if (!isAdminSession(dbGet)) {
+                    sendReply(session, pluginAction, tag, responseid, { result: 'error', error: 'forbidden' });
+                    return;
+                }
+                var nextPso = sanitizePsoConfig(command.pso);
+                if (!nextPso) {
+                    sendReply(session, pluginAction, tag, responseid, { result: 'error', error: 'invalid_payload' });
+                    return;
+                }
+                readConfig(obj.meshServer, function (cur) {
+                    writeConfig(obj.meshServer, { jira: cur.jira, pso: nextPso }, function (err, doc) {
+                        if (err) {
+                            sendReply(session, pluginAction, tag, responseid, { result: 'error', error: String(err.message || err) });
+                            return;
+                        }
+                        sendReply(session, pluginAction, tag, responseid, {
+                            result: 'ok',
+                            jira: doc.jira,
+                            pso: doc.pso,
+                            configuredAt: doc.configuredAt
+                        });
+                    });
+                });
+                return;
+            }
+            case 'config.remove': {
+                if (!isAdminSession(dbGet)) {
+                    sendReply(session, pluginAction, tag, responseid, { result: 'error', error: 'forbidden' });
+                    return;
+                }
+                var providerId = String(command.providerId || '');
+                if (providerId !== 'jira' && providerId !== 'pso') {
+                    sendReply(session, pluginAction, tag, responseid, { result: 'error', error: 'invalid_providerId' });
+                    return;
+                }
+                readConfig(obj.meshServer, function (cur) {
+                    var next = { jira: cur.jira, pso: cur.pso };
+                    next[providerId] = null;
+                    writeConfig(obj.meshServer, next, function (err, doc) {
+                        if (err) {
+                            sendReply(session, pluginAction, tag, responseid, { result: 'error', error: String(err.message || err) });
+                            return;
+                        }
+                        sendReply(session, pluginAction, tag, responseid, {
+                            result: 'ok',
+                            jira: doc.jira,
+                            pso: doc.pso,
+                            configuredAt: doc.configuredAt
+                        });
+                    });
                 });
                 return;
             }
