@@ -22,6 +22,15 @@
  *
  * Errors are returned to the client as `{ result:'error', error:'<short>' }`
  * — the RemoraHQ UI surfaces them in a toast.
+ *
+ * v0.3.0 (AUDIT-5 #34) — SSRF / credential-exfil hardening:
+ *   - jira.create sources baseUrl/projectKey/issueType/assignee from the
+ *     server-stored config doc, NEVER the client, so the credentialed request
+ *     cannot be redirected. The client supplies only summary/description/
+ *     reporter. This restores the "token never leaves the server" invariant.
+ *   - jira.test is now admin-only (isAdminSession), matching the config writes.
+ *   - Both reject non-HTTPS and private/loopback/link-local hosts before the
+ *     credential is sent (assertSafeJiraUrl).
  */
 
 'use strict';
@@ -33,7 +42,7 @@ var http = require('http');
 var url = require('url');
 
 var PLUGIN_SHORT_NAME = 'remoraIntegrations';
-var PLUGIN_VERSION = '0.2.0';
+var PLUGIN_VERSION = '0.3.0';
 var JIRA_TIMEOUT_MS = 15000;
 
 // v0.2.0 (RC-13.18 / B-13.5/2). Singleton Mesh DB doc holding the
@@ -106,6 +115,42 @@ function sanitizePsoConfig(raw) {
     var baseUrl = typeof raw.baseUrl === 'string' ? raw.baseUrl.trim() : '';
     if (!baseUrl) return null;
     return { baseUrl: baseUrl };
+}
+
+// v0.3.0 (AUDIT-5 #34). SSRF / credential-exfil hardening. Reject any request
+// target that is not plain HTTPS to a non-private host, so the credentialed
+// Jira request cannot be redirected at an attacker host or the cloud-metadata
+// endpoint. Residual accepted pre-beta: a public hostname that DNS-resolves to
+// a private IP (rebinding) — the primary exfil path is already closed by
+// sourcing `baseUrl` from the server-stored config in jira.create, never the
+// client.
+function isPrivateHostname(h) {
+    if (!h) return true;
+    var host = String(h).toLowerCase().replace(/^\[/, '').replace(/\]$/, '');
+    if (host === 'localhost' || /\.localhost$/.test(host)) return true;
+    if (host === '::1') return true;                                   // IPv6 loopback
+    if (host.indexOf('fe80:') === 0) return true;                      // IPv6 link-local
+    if (host.indexOf('fc') === 0 || host.indexOf('fd') === 0) return true; // IPv6 unique-local
+    var m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+    if (m) {
+        var a = +m[1], b = +m[2];
+        if (a === 0 || a === 10 || a === 127) return true;             // this-net / private / loopback
+        if (a === 169 && b === 254) return true;                       // link-local + cloud metadata
+        if (a === 172 && b >= 16 && b <= 31) return true;              // private
+        if (a === 192 && b === 168) return true;                       // private
+        if (a === 100 && b >= 64 && b <= 127) return true;             // CGNAT
+    }
+    return false;
+}
+
+// Returns a short error slug if the URL is unsafe to send a credential to,
+// else null.
+function assertSafeJiraUrl(rawUrl) {
+    var parsed;
+    try { parsed = url.parse(String(rawUrl || '')); } catch (e) { return 'invalid_baseUrl'; }
+    if (parsed.protocol !== 'https:') return 'baseUrl_must_be_https';
+    if (isPrivateHostname(parsed.hostname)) return 'baseUrl_host_forbidden';
+    return null;
 }
 
 /**
@@ -291,6 +336,20 @@ module.exports.remoraIntegrations = function (parent) {
 
         switch (pluginAction) {
             case 'jira.test': {
+                // v0.3.0 (AUDIT-5 #34). Admin-only connection test — this is the
+                // config UI's "Test" button, where the admin enters the baseUrl
+                // being validated. Gate it (same bar as config writes) so a
+                // non-admin can no longer drive a credentialed request, and
+                // reject non-HTTPS / private-host targets.
+                if (!isAdminSession(dbGet)) {
+                    sendReply(session, pluginAction, tag, responseid, { result: 'error', error: 'forbidden' });
+                    return;
+                }
+                var badTestUrl = assertSafeJiraUrl(command.baseUrl);
+                if (badTestUrl) {
+                    sendReply(session, pluginAction, tag, responseid, { result: 'error', error: badTestUrl });
+                    return;
+                }
                 runJiraTest(command).then(function (data) {
                     sendReply(session, pluginAction, tag, responseid, { result: 'ok', userEmail: data.userEmail, displayName: data.displayName });
                 }).catch(function (err) {
@@ -299,10 +358,38 @@ module.exports.remoraIntegrations = function (parent) {
                 return;
             }
             case 'jira.create': {
-                runJiraCreate(command).then(function (data) {
-                    sendReply(session, pluginAction, tag, responseid, { result: 'ok', key: data.key, url: data.url });
-                }).catch(function (err) {
-                    sendReply(session, pluginAction, tag, responseid, { result: 'error', error: String(err && err.message ? err.message : err) });
+                // v0.3.0 (AUDIT-5 #34). Operator-callable (bug reports), so it
+                // is NOT admin-gated — but the request target MUST come from the
+                // server-stored config, never the client `baseUrl`/`projectKey`.
+                // Previously a caller could redirect the credentialed request at
+                // an attacker host (JIRA token exfiltration) or an internal
+                // address (SSRF). The client only supplies summary/description/
+                // reporter; everything that selects the destination is read from
+                // the admin-configured doc.
+                readConfig(obj.meshServer, function (cfg) {
+                    if (!cfg.jira || !cfg.jira.baseUrl || !cfg.jira.projectKey) {
+                        sendReply(session, pluginAction, tag, responseid, { result: 'error', error: 'not_configured' });
+                        return;
+                    }
+                    var badCreateUrl = assertSafeJiraUrl(cfg.jira.baseUrl);
+                    if (badCreateUrl) {
+                        sendReply(session, pluginAction, tag, responseid, { result: 'error', error: badCreateUrl });
+                        return;
+                    }
+                    var safeCommand = {
+                        baseUrl: cfg.jira.baseUrl,
+                        projectKey: cfg.jira.projectKey,
+                        issueType: cfg.jira.issueType || command.issueType,
+                        assigneeName: cfg.jira.assignee || command.assigneeName,
+                        reporterName: command.reporterName,
+                        summary: command.summary,
+                        description: command.description
+                    };
+                    runJiraCreate(safeCommand).then(function (data) {
+                        sendReply(session, pluginAction, tag, responseid, { result: 'ok', key: data.key, url: data.url });
+                    }).catch(function (err) {
+                        sendReply(session, pluginAction, tag, responseid, { result: 'error', error: String(err && err.message ? err.message : err) });
+                    });
                 });
                 return;
             }
